@@ -8,8 +8,9 @@ import json
 import uuid
 import base64
 from envelope import encrypt_object, decrypt_object
-from umbral import SecretKey
+from umbral import SecretKey, PublicKey
 from umbral import Signer
+from umbral import generate_kfrags, reencrypt
 
 # TODO: Move repeated code into its own helper file
 def b64e(b):
@@ -17,6 +18,16 @@ def b64e(b):
 
 def b64d(s):
     return base64.b64decode(s.encode("ascii"))
+
+def capsule_to_b64(capsule):
+    return b64e(bytes(capsule))
+
+def capsule_from_b64(b64):
+    from umbral.capsule import Capsule
+    return Capsule.from_bytes(b64d(b64))
+
+def cfrag_to_b64(cfrag):
+    return b64e(bytes(cfrag))
 
 # Ensures vault (program storage) exists
 # Place user keys in users/ and encrypted backups in objects/
@@ -125,6 +136,14 @@ def main():
     decrypt.add_argument("--vault", dest="vault", required=True)
     decrypt.add_argument("--out", dest="out", required=True)
 
+    # Add share keyword
+    share = subparsers.add_parser("share")
+
+    share.add_argument("--from", dest="owner", required=True)
+    share.add_argument("--to", dest="recipient", required=True)
+    share.add_argument("--id", dest="obj_id", required=True)
+    share.add_argument("--vault", dest="vault", required=True)
+
     args = parser.parse_args()
 
     if args.command == "encrypt":
@@ -171,6 +190,49 @@ def main():
         with open(args.out, "wb") as f:
             f.write(plaintext)
         print(f"Decryption complete.\nOutput in: {args.out}")
+
+    elif args.command == "share":
+        # Load object for modification
+        file_ciphertext, manifest = read_obj(args.vault, args.obj_id)
+
+        umb = manifest["umbral"]
+
+        # Load owner and recipient user key files
+        owner_umb = get_user_umbral(args.vault, args.owner)
+        recipient_umb = get_user_umbral(args.vault, args.recipient)
+
+        # Deserialise keys
+        owner_sk = SecretKey.from_bytes(b64d(owner_umb["sk"]))
+        owner_sk_sign = SecretKey.from_bytes(b64d(owner_umb["sk_sign"]))
+        signer = Signer(owner_sk_sign)
+
+        recipient_pk = PublicKey.from_bytes(b64d(recipient_umb["pk"]))
+
+        # Deserialise capsule from manifest for proxy transform
+        capsule = capsule_from_b64(umb["capsule"])
+
+        # Create re-encryption key fragments
+        kfrags = generate_kfrags(
+            delegating_sk=owner_sk,
+            receiving_pk=recipient_pk,
+            signer=signer,
+            threshold=1,
+            shares=1
+        )
+
+        # Proxy re-encryption
+        cfrags = [reencrypt(capsule=capsule, kfrag=kfrags[0])]
+
+        # Add delegate to manifest
+        if "delegations" not in umb:
+            umb["delegations"] = {}
+
+        umb["delegations"][args.recipient] = { "cfrags": [cfrag_to_b64(cfrags[0])] }
+
+        # Re-write ( to append) to manifest
+        write_obj(args.vault, args.obj_id, file_ciphertext, manifest)
+        
+        print("Key shared.")
 
 if __name__ == "__main__":
     main()
