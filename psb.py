@@ -35,22 +35,6 @@ def set_vault(vault_path, user):
     os.makedirs(os.path.join(vault_path, "users", user), exist_ok=True)
     os.makedirs(os.path.join(vault_path, "objects"), exist_ok=True)
 
-# Loads user's KEK, or creates it if missing
-def get_kek_old(vault_path, user):
-    set_vault(vault_path, user)
-
-    kek_path = os.path.join(vault_path, "users", user, "kek.bin")
-
-    # Generate the user's KEK if it they don't have one
-    if not os.path.exists(kek_path):
-        kek = os.urandom(32)
-        with open(kek_path, "wb") as f:
-            f.write(kek)
-        return kek
-
-    # Loads if exists
-    with open(kek_path, "rb") as f:
-        return f.read()
 
 def get_user_umbral(vault_path, user):
     set_vault(vault_path, user)
@@ -146,21 +130,16 @@ def main():
 
     args = parser.parse_args()
 
+    # Generates a random DEK, encrypts file with AES-GCM, then
+    # protects the DEK with Umbral PRE
     if args.command == "encrypt":
-        '''
-        # First load user's KEK
-        kek = get_kek(args.vault, args.user)
-        '''
         # Read plaintext bytes
         with open(args.file, "rb") as f:
             plaintext = f.read()
-        '''
-        # Encrypts the file with DEK, then encrypts DEK with KEK
-        file_ciphertext, manifest = encrypt_object(args.user, plaintext, kek)
-        '''        
+      
         umb = get_user_umbral(args.vault, args.user)
 
-        # Encrypts the file with DEK and encrypts the DEK to owner via Umbral
+        # Encrypt the file with DEK and encrypts the DEK to owner via Umbral
         file_ciphertext, manifest = encrypt_object(args.user, plaintext,
                                                 umb["pk"], umb["pk_verify"])
 
@@ -169,18 +148,13 @@ def main():
         write_obj(args.vault, obj_id, file_ciphertext, manifest)
         print(f"Encryption complete.\nObject ID: {obj_id}")
 
-
+    # Recovers DEK from the owner directly or a delegate then 
+    # decrypts the file using AES-GCM
     elif args.command == "decrypt":
-        '''
-        # First load user's KEK
-        kek = get_kek(args.vault, args.user)
-        '''
+
         # Load the ciphertext and the manifest
         file_ciphertext, manifest = read_obj(args.vault, args.obj_id)
-        '''
-        # Unwrap key and decrypt file (owner only until delegation added)
-        plaintext = decrypt_object(args.user, file_ciphertext, manifest, kek)
-        '''
+
 
         # Load requester's Umbral keys for decryption
         umb = get_user_umbral(args.vault, args.user)
@@ -191,6 +165,9 @@ def main():
             f.write(plaintext)
         print(f"Decryption complete.\nOutput in: {args.out}")
 
+    # Generates re-encryption fragments so a proxy can transform
+    # access from owner to recipient without revealing
+    # plaintext or keys
     elif args.command == "share":
         # Load object for modification
         file_ciphertext, manifest = read_obj(args.vault, args.obj_id)
@@ -229,7 +206,7 @@ def main():
 
         umb["delegations"][args.recipient] = { "cfrags": [cfrag_to_b64(cfrags[0])] }
 
-        # Re-write ( to append) to manifest
+        # Re-write (to append) to manifest
         write_obj(args.vault, args.obj_id, file_ciphertext, manifest)
         
         print("Key shared.")
